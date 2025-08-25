@@ -20,7 +20,6 @@ on:
   workflow_dispatch:
 
 env:
-  # ── 原リポジトリが読む環境変数（変更不要）
   DIFY_TOKENS: ${{ secrets.DIFY_TOKENS }}
   DIFY_BASE_URL: ${{ secrets.DIFY_BASE_URL }}
   DIFY_INPUTS: ${{ secrets.DIFY_INPUTS }}
@@ -53,12 +52,20 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install
-        working-directory: dify-schedule
-        run: npm ci
+      # Yarn前提のため Corepack を有効化（Yarnが無ければ自動で使えるように）
+      - name: Enable Corepack (Yarn)
+        run: corepack enable
 
-      # ▼ ここで “どの cron で起動したか” によって horizon を決定し、
-      #    USDJPY / GBPUSD を順に実行。DIFY_INPUTS は “コマンドにインライン付与” する。
+      - name: Install deps (Yarn)
+        working-directory: dify-schedule
+        run: |
+          # lockfileがあれば厳密インストール、無ければ通常インストール
+          if [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          else
+            yarn install
+          fi
+
       - name: Run per schedule (inject DIFY_INPUTS inline)
         working-directory: dify-schedule
         env:
@@ -70,7 +77,7 @@ jobs:
           set -euo pipefail
           echo "Triggered by schedule: '${SCHEDULE:-manual}'"
 
-          # マッピング：cron → horizon
+          # cron → horizon マッピング
           H=""
           case "${SCHEDULE:-manual}" in
             "10 0 * * 2") H="72" ;;                                 # Tue 00:10 UTC (JST 09:10)
@@ -80,7 +87,7 @@ jobs:
             *) echo "No matched schedule → fallback to manual/single-run";;
           esac
 
-          # jq が確実にあるとは限らないので node で JSON を作る関数を用意
+          # Nodeで安全に JSON 生成
           make_inputs() {
             node -e 'const [p,h,pw]=process.argv.slice(1);
                      const o={pair:p,horizon_hours:Number(h),password:pw,
@@ -93,15 +100,14 @@ jobs:
             local INP
             INP="$(make_inputs "$PAIR" "$HZ" "${PASSWORD}")"
             echo "→ Run pair=${PAIR} horizon=${HZ}"
-            # 重要：DIFY_INPUTS を “コマンド前に1回限りの環境変数” としてインライン付与
-            DIFY_INPUTS="${INP}" DIFY_TOKENS="${DIFY_TOKENS}" DIFY_BASE_URL="${DIFY_BASE_URL}" node index.js
+            # DIFY_INPUTS をインラインで付与（空渡し防止）
+            DIFY_INPUTS="${INP}" DIFY_TOKENS="${DIFY_TOKENS}" DIFY_BASE_URL="${DIFY_BASE_URL}" yarn workflowDify
           }
 
           if [ -n "${H}" ]; then
             run_one USDJPY "${H}"
             run_one GBPUSD "${H}"
           else
-            # 手動実行や既定枠は env.DIFY_INPUTS をそのまま使って単発実行
             echo "Using env.DIFY_INPUTS as-is (single-run)"
-            node index.js
+            yarn workflowDify
           fi
