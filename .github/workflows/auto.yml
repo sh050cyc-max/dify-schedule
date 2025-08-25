@@ -2,7 +2,7 @@ name: Auto
 
 on:
   schedule:
-    # 既定（原作者設定）: 北京時間 06:30 → UTC 22:30
+    # 既定（原作者設定）: 北京时间 06:30 → UTC 22:30
     - cron: "30 22 * * *"
     # 追加: JST=UTC+9
     # 72h: 毎週火曜 09:10 JST → UTC 00:10 火
@@ -20,6 +20,7 @@ on:
   workflow_dispatch:
 
 env:
+  # 既定ENV（原リポ仕様）
   DIFY_TOKENS: ${{ secrets.DIFY_TOKENS }}
   DIFY_BASE_URL: ${{ secrets.DIFY_BASE_URL }}
   DIFY_INPUTS: ${{ secrets.DIFY_INPUTS }}
@@ -52,42 +53,37 @@ jobs:
         with:
           node-version: 20
 
-      # Yarn前提のため Corepack を有効化（Yarnが無ければ自動で使えるように）
       - name: Enable Corepack (Yarn)
         run: corepack enable
 
       - name: Install deps (Yarn)
         working-directory: dify-schedule
         run: |
-          # lockfileがあれば厳密インストール、無ければ通常インストール
           if [ -f yarn.lock ]; then
             yarn install --frozen-lockfile
           else
             yarn install
           fi
 
-      - name: Run per schedule (inject DIFY_INPUTS inline)
-        working-directory: dify-schedule
+      # ここで “cron→horizon” を決定し、USDJPY/GBPUSD の inputs を
+      # GITHUB_ENV に書き込んで “ジョブ全体のENV” に昇格させる（取りこぼし防止）
+      - name: Build DIFY_INPUTS for this trigger
         env:
           SCHEDULE: ${{ github.event.schedule }}
           PASSWORD: ${{ secrets.WORKFLOW_PASSWORD }}
-          DIFY_BASE_URL: ${{ env.DIFY_BASE_URL }}
-          DIFY_TOKENS:   ${{ env.DIFY_TOKENS }}
         run: |
           set -euo pipefail
           echo "Triggered by schedule: '${SCHEDULE:-manual}'"
 
-          # cron → horizon マッピング
           H=""
           case "${SCHEDULE:-manual}" in
             "10 0 * * 2") H="72" ;;                                 # Tue 00:10 UTC (JST 09:10)
             "15 0 * * *") H="24" ;;                                 # Daily 00:15 UTC (JST 09:15)
             "20 0 * * *"|"30 8 * * *"|"30 14 * * *") H="8" ;;       # 09:20 / 17:30 / 23:30 JST
             "25 0 * * *"|"0 4,8,12,16,20 * * *") H="4" ;;           # 09:25 から4h毎 JST
-            *) echo "No matched schedule → fallback to manual/single-run";;
+            *) H="" ;;
           esac
 
-          # Nodeで安全に JSON 生成
           make_inputs() {
             node -e 'const [p,h,pw]=process.argv.slice(1);
                      const o={pair:p,horizon_hours:Number(h),password:pw,
@@ -95,19 +91,102 @@ jobs:
                      process.stdout.write(JSON.stringify(o));' "$@"
           }
 
-          run_one() {
-            local PAIR="$1"; local HZ="$2"
-            local INP
-            INP="$(make_inputs "$PAIR" "$HZ" "${PASSWORD}")"
-            echo "→ Run pair=${PAIR} horizon=${HZ}"
-            # DIFY_INPUTS をインラインで付与（空渡し防止）
-            DIFY_INPUTS="${INP}" DIFY_TOKENS="${DIFY_TOKENS}" DIFY_BASE_URL="${DIFY_BASE_URL}" yarn workflowDify
-          }
-
           if [ -n "${H}" ]; then
-            run_one USDJPY "${H}"
-            run_one GBPUSD "${H}"
+            INP_USDJPY="$(make_inputs USDJPY "${H}" "${PASSWORD}")"
+            INP_GBPUSD="$(make_inputs GBPUSD "${H}" "${PASSWORD}")"
+            echo "DIFY_INPUTS_USDJPY=${INP_USDJPY}" >> "$GITHUB_ENV"
+            echo "DIFY_INPUTS_GBPUSD=${INP_GBPUSD}" >> "$GITHUB_ENV"
+            echo "HORIZON=${H}" >> "$GITHUB_ENV"
           else
-            echo "Using env.DIFY_INPUTS as-is (single-run)"
-            yarn workflowDify
+            echo "Manual or default trigger → use env.DIFY_INPUTS as-is"
+            echo "HORIZON=" >> "$GITHUB_ENV"
           fi
+
+      # デバッグ（長さと先頭だけ表示。全文は表示しない）
+      - name: Debug show inputs (safe)
+        run: |
+          set -e
+          for k in DIFY_INPUTS DIFY_INPUTS_USDJPY DIFY_INPUTS_GBPUSD; do
+            v="${!k:-}"
+            if [ -n "$v" ]; then
+              len=$(printf "%s" "$v" | wc -c)
+              head=$(printf "%s" "$v" | cut -c1-80)
+              echo "$k length=$len, head=${head}..."
+            else
+              echo "$k is empty"
+            fi
+          done
+
+      - name: Verify /v1/info (optional)
+        env:
+          DIFY_TOKENS:   ${{ env.DIFY_TOKENS }}
+          DIFY_BASE_URL: ${{ env.DIFY_BASE_URL }}
+        run: |
+          set -e
+          curl -sS -i -H "Authorization: Bearer ${DIFY_TOKENS}" \
+            "${DIFY_BASE_URL:-https://api.dify.ai/v1}/info?user=gha-probe" | head -n 20
+
+      - name: Run dify-schedule (USDJPY)
+        if: ${{ env.HORIZON != '' }}
+        working-directory: dify-schedule
+        env:
+          DIFY_TOKENS:   ${{ env.DIFY_TOKENS }}
+          DIFY_BASE_URL: ${{ env.DIFY_BASE_URL }}
+          DIFY_INPUTS:   ${{ env.DIFY_INPUTS_USDJPY }}
+        run: |
+          echo "Run USDJPY"
+          yarn workflowDify || echo "::warning::dify-schedule failed for USDJPY (will try curl fallback)"
+
+      - name: Run dify-schedule (GBPUSD)
+        if: ${{ env.HORIZON != '' }}
+        working-directory: dify-schedule
+        env:
+          DIFY_TOKENS:   ${{ env.DIFY_TOKENS }}
+          DIFY_BASE_URL: ${{ env.DIFY_BASE_URL }}
+          DIFY_INPUTS:   ${{ env.DIFY_INPUTS_GBPUSD }}
+        run: |
+          echo "Run GBPUSD"
+          yarn workflowDify || echo "::warning::dify-schedule failed for GBPUSD (will try curl fallback)"
+
+      # フォールバック：dify-schedule が 400 等で失敗した場合、同じ入力で直叩き
+      - name: Fallback curl (USDJPY)
+        if: ${{ env.HORIZON != '' }}
+        env:
+          DIFY_TOKENS:   ${{ env.DIFY_TOKENS }}
+          DIFY_BASE_URL: ${{ env.DIFY_BASE_URL }}
+          DIFY_INPUTS:   ${{ env.DIFY_INPUTS_USDJPY }}
+        run: |
+          set -e
+          echo "Fallback curl USDJPY"
+          curl -sS -X POST "${DIFY_BASE_URL:-https://api.dify.ai/v1}/workflows/run" \
+            -H "Authorization: Bearer ${DIFY_TOKENS}" \
+            -H "Content-Type: application/json" \
+            -d "$(node -e 'const i=process.env.DIFY_INPUTS; const inputs=JSON.parse(i);
+                           process.stdout.write(JSON.stringify({inputs, response_mode:"blocking", user:"github-fallback"}));')"
+
+      - name: Fallback curl (GBPUSD)
+        if: ${{ env.HORIZON != '' }}
+        env:
+          DIFY_TOKENS:   ${{ env.DIFY_TOKENS }}
+          DIFY_BASE_URL: ${{ env.DIFY_BASE_URL }}
+          DIFY_INPUTS:   ${{ env.DIFY_INPUTS_GBPUSD }}
+        run: |
+          set -e
+          echo "Fallback curl GBPUSD"
+          curl -sS -X POST "${DIFY_BASE_URL:-https://api.dify.ai/v1}/workflows/run" \
+            -H "Authorization: Bearer ${DIFY_TOKENS}" \
+            -H "Content-Type: application/json" \
+            -d "$(node -e 'const i=process.env.DIFY_INPUTS; const inputs=JSON.parse(i);
+                           process.stdout.write(JSON.stringify({inputs, response_mode:"blocking", user:"github-fallback"}));')"
+
+      # 既定枠/手動実行（HORIZON空）のときは、元の env.DIFY_INPUTS をそのまま1回実行
+      - name: Run dify-schedule (single-run, env.DIFY_INPUTS)
+        if: ${{ env.HORIZON == '' }}
+        working-directory: dify-schedule
+        env:
+          DIFY_TOKENS:   ${{ env.DIFY_TOKENS }}
+          DIFY_BASE_URL: ${{ env.DIFY_BASE_URL }}
+          DIFY_INPUTS:   ${{ env.DIFY_INPUTS }}
+        run: |
+          echo "Single-run with env.DIFY_INPUTS"
+          yarn workflowDify
