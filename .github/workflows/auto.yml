@@ -41,50 +41,67 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+
+      - name: Checkout dify-schedule
+        uses: actions/checkout@v4
+        with:
+          repository: leochen-g/dify-schedule
+          path: dify-schedule
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Ensure jq
-        run: |
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y jq
-          fi
+      - name: Install
+        working-directory: dify-schedule
+        run: npm ci
 
-      # ▼▼ 追加ステップ：発火した cron に応じて horizon を決め、
-      #   USDJPY / GBPUSD を順に実行（password も注入） ▼▼
-      - name: Prepare and run (inject DIFY_INPUTS per schedule)
+      # ▼ ここで “どの cron で起動したか” によって horizon を決定し、
+      #    USDJPY / GBPUSD を順に実行。DIFY_INPUTS は “コマンドにインライン付与” する。
+      - name: Run per schedule (inject DIFY_INPUTS inline)
+        working-directory: dify-schedule
         env:
           SCHEDULE: ${{ github.event.schedule }}
           PASSWORD: ${{ secrets.WORKFLOW_PASSWORD }}
+          DIFY_BASE_URL: ${{ env.DIFY_BASE_URL }}
+          DIFY_TOKENS:   ${{ env.DIFY_TOKENS }}
         run: |
           set -euo pipefail
-          echo "Triggered by schedule: '${SCHEDULE}'"
+          echo "Triggered by schedule: '${SCHEDULE:-manual}'"
 
-          # どの cron で来たかを horizon にマッピング
+          # マッピング：cron → horizon
           H=""
-          case "$SCHEDULE" in
-            "10 0 * * 2") H="72" ;;                                # Tue 00:10 UTC (JST Tue 09:10)
-            "15 0 * * *") H="24" ;;                                # Daily 00:15 UTC (JST 09:15)
-            "20 0 * * *"|"30 8 * * *"|"30 14 * * *") H="8" ;;      # JST 09:20 / 17:30 / 23:30
-            "25 0 * * *"|"0 4,8,12,16,20 * * *") H="4" ;;          # JST 09:25 / 13/17/21/01/05:00
-            *) H="" ;;
+          case "${SCHEDULE:-manual}" in
+            "10 0 * * 2") H="72" ;;                                 # Tue 00:10 UTC (JST 09:10)
+            "15 0 * * *") H="24" ;;                                 # Daily 00:15 UTC (JST 09:15)
+            "20 0 * * *"|"30 8 * * *"|"30 14 * * *") H="8" ;;       # 09:20 / 17:30 / 23:30 JST
+            "25 0 * * *"|"0 4,8,12,16,20 * * *") H="4" ;;           # 09:25 から4h毎 JST
+            *) echo "No matched schedule → fallback to manual/single-run";;
           esac
 
-          if [ -n "$H" ]; then
-            for P in USDJPY GBPUSD; do
-              # ★ API仕様通りに inputs をラップして 400 を回避
-              export DIFY_INPUTS=$(jq -nc --arg p "$P" --argjson h "$H" --arg pwd "$PASSWORD" \
-                '{inputs:{pair:$p,horizon_hours:$h,password:$pwd,comment:("auto by dify-schedule ("+($h|tostring)+"h)")},response_mode:"blocking",user:"github-cron"}')
-              echo "Running pair=$P horizon=$H"
-              yarn
-              yarn workflowDify
-            done
-            exit 0
-          fi
+          # jq が確実にあるとは限らないので node で JSON を作る関数を用意
+          make_inputs() {
+            node -e 'const [p,h,pw]=process.argv.slice(1);
+                     const o={pair:p,horizon_hours:Number(h),password:pw,
+                              comment:`auto by dify-schedule (${h}h)`};
+                     process.stdout.write(JSON.stringify(o));' "$@"
+          }
 
-          # Hが空（既定枠/手動実行）の場合は、既存の env.DIFY_INPUTS をそのまま使用
-          echo "No horizon override. Use env DIFY_INPUTS once."
-          yarn
-          yarn workflowDify
+          run_one() {
+            local PAIR="$1"; local HZ="$2"
+            local INP
+            INP="$(make_inputs "$PAIR" "$HZ" "${PASSWORD}")"
+            echo "→ Run pair=${PAIR} horizon=${HZ}"
+            # 重要：DIFY_INPUTS を “コマンド前に1回限りの環境変数” としてインライン付与
+            DIFY_INPUTS="${INP}" DIFY_TOKENS="${DIFY_TOKENS}" DIFY_BASE_URL="${DIFY_BASE_URL}" node index.js
+          }
+
+          if [ -n "${H}" ]; then
+            run_one USDJPY "${H}"
+            run_one GBPUSD "${H}"
+          else
+            # 手動実行や既定枠は env.DIFY_INPUTS をそのまま使って単発実行
+            echo "Using env.DIFY_INPUTS as-is (single-run)"
+            node index.js
+          fi
