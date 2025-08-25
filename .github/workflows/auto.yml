@@ -1,115 +1,92 @@
-name: AP1 schedules via dify-schedule
+name: Auto
 
 on:
   schedule:
-    # JST=UTC+9
+    # 既定（原作者設定）: 北京時間 06:30 → UTC 22:30
+    - cron: "30 22 * * *"
+    # 追加: JST=UTC+9
     # 72h: 毎週火曜 09:10 JST → UTC 00:10 火
     - cron: "10 0 * * 2"
     # 24h: 毎日 09:15 JST → UTC 00:15 毎日
     - cron: "15 0 * * *"
-    # 8h: 09:20 JST を起点に 8h毎 → UTC 00:20 / 08:20 / 16:20
+    # 8h: JST 09:20 / 17:30 / 23:30 → UTC 00:20 / 08:30 / 14:30
     - cron: "20 0 * * *"
-    - cron: "20 8 * * *"
-    - cron: "20 16 * * *"
-    # 4h: 09:25 JST 起点 → UTC 00:25 / 04:25 / 08:25 / 12:25 / 16:25 / 20:25
-    - cron: "25 0,4,8,12,16,20 * * *"
-  workflow_dispatch: {}  # 手動実行も可能
+    - cron: "30 8 * * *"
+    - cron: "30 14 * * *"
+    # 4h: JST 09:25 / 13:00 / 17:00 / 21:00 / 01:00 / 05:00
+    #  → UTC 00:25 / 04:00 / 08:00 / 12:00 / 16:00 / 20:00
+    - cron: "25 0 * * *"
+    - cron: "0 4,8,12,16,20 * * *"
+  workflow_dispatch:
 
-concurrency:
-  group: ap1-${{ github.ref }}
-  cancel-in-progress: false
+env:
+  # ── 原リポジトリが読む環境変数（変更不要）
+  DIFY_TOKENS: ${{ secrets.DIFY_TOKENS }}
+  DIFY_BASE_URL: ${{ secrets.DIFY_BASE_URL }}
+  DIFY_INPUTS: ${{ secrets.DIFY_INPUTS }}
+  EMAIL_USER: ${{ secrets.EMAIL_USER }}
+  EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+  EMAIL_TO: ${{ secrets.EMAIL_TO }}
+  DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
+  PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+  WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+  SERVERPUSHKEY: ${{ secrets.SERVERPUSHKEY }}
+  FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+  AIBOTK_KEY: ${{ secrets.AIBOTK_KEY }}
+  AIBOTK_ROOM_RECIVER: ${{ secrets.AIBOTK_ROOM_RECIVER }}
+  AIBOTK_CONTACT_RECIVER: ${{ secrets.AIBOTK_CONTACT_RECIVER }}
 
 jobs:
-  # 共通ステップを再利用するための "composite" 風テンプレ（matrix毎に呼び出す）
-  run-scheduler:
-    name: Run ${{ matrix.horizon }}h for ${{ matrix.pair }}
+  DifyWorkflow:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # === 72h（火曜 09:10 JST のときだけ動かす）===
-          - when: "10 0 * * 2"
-            horizon: 72
-            pair: USDJPY
-          - when: "10 0 * * 2"
-            horizon: 72
-            pair: GBPUSD
-
-          # === 24h（毎日 09:15 JST のときだけ動かす）===
-          - when: "15 0 * * *"
-            horizon: 24
-            pair: USDJPY
-          - when: "15 0 * * *"
-            horizon: 24
-            pair: GBPUSD
-
-          # === 8h（09:20 / 17:20 / 01:20 JST の枠で動かす）===
-          - when: "20 0 * * *"
-            horizon: 8
-            pair: USDJPY
-          - when: "20 0 * * *"
-            horizon: 8
-            pair: GBPUSD
-          - when: "20 8 * * *"
-            horizon: 8
-            pair: USDJPY
-          - when: "20 8 * * *"
-            horizon: 8
-            pair: GBPUSD
-          - when: "20 16 * * *"
-            horizon: 8
-            pair: USDJPY
-          - when: "20 16 * * *"
-            horizon: 8
-            pair: GBPUSD
-
-          # === 4h（09:25 起点の4h毎）===
-          - when: "25 0,4,8,12,16,20 * * *"
-            horizon: 4
-            pair: USDJPY
-          - when: "25 0,4,8,12,16,20 * * *"
-            horizon: 4
-            pair: GBPUSD
-
-    # “今のトリガー（cron）と行が一致するものだけ” を実行
-    if: ${{ contains(matrix.when, github.event.schedule || '') || github.event_name == 'workflow_dispatch' }}
-
-    env:
-      # === スケジューラ側が読む環境変数 ===
-      DIFY_BASE_URL: ${{ secrets.DIFY_BASE_URL }}     # 未設定ならツール側が https://api.dify.ai/v1 を使用
-      DIFY_TOKENS:   ${{ secrets.DIFY_TOKENS }}       # ; 区切りで複数可
-      # ここで “実行ごとに異なる入力” を JSON で渡す
-      DIFY_INPUTS: >-
-        {"pair":"${{ matrix.pair }}",
-         "horizon_hours":${{ matrix.horizon }},
-         "password":"${{ secrets.WORKFLOW_PASSWORD }}",
-         "comment":"auto by dify-schedule (${{ matrix.horizon }}h)"}
-
     steps:
-      - name: Checkout dify-schedule
-        uses: actions/checkout@v4
-        with:
-          repository: leochen-g/dify-schedule
-          path: dify-schedule
+      - uses: actions/checkout@v2
+      - uses: actions/setup-node@v2
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install
-        working-directory: dify-schedule
-        run: npm ci
-
-      - name: Run scheduler
-        working-directory: dify-schedule
+      # ▼▼ 追加ステップ：発火した cron に応じて horizon を決め、
+      #   USDJPY / GBPUSD を順に実行（password も注入） ▼▼
+      - name: Prepare and run (inject DIFY_INPUTS per schedule)
         env:
-          DIFY_BASE_URL: ${{ env.DIFY_BASE_URL }}
-          DIFY_TOKENS:   ${{ env.DIFY_TOKENS }}
-          DIFY_INPUTS:   ${{ env.DIFY_INPUTS }}
-          # ↓ メール通知など追加したい場合は README の通知系ENVをここに並べる
-          # EMAIL_USER: ${{ secrets.EMAIL_USER }}
-          # EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
-          # EMAIL_TO:   you@example.com
-        run: node index.js
+          SCHEDULE: ${{ github.event.schedule }}
+          PASSWORD: ${{ secrets.WORKFLOW_PASSWORD }}
+          TOKENS:   ${{ env.DIFY_TOKENS }}
+          BASE_URL: ${{ env.DIFY_BASE_URL }}
+        run: |
+          set -euo pipefail
+          echo "Triggered by schedule: '${SCHEDULE}'"
+
+          # どの cron で来たかを horizon にマッピング
+          H=""
+          case "$SCHEDULE" in
+            "10 0 * * 2") H="72" ;;               # Tue 00:10 UTC (JST Tue 09:10)
+            "15 0 * * *") H="24" ;;               # Daily 00:15 UTC (JST 09:15)
+            "20 0 * * *"|"30 8 * * *"|"30 14 * * *") H="8" ;;   # JST 09:20 / 17:30 / 23:30
+            "25 0 * * *"|"0 4,8,12,16,20 * * *") H="4" ;;       # JST 09:25 / 13/17/21/01/05:00
+            *) H="" ;;
+          esac
+
+          # 手動実行や既定枠のとき、Secretsの DIFY_INPUTS をそのまま使いたいなら H="" のままでもOK
+          if [ -n "$H" ]; then
+            for P in USDJPY GBPUSD; do
+              # dify-schedule は DIFY_INPUTS を1回分だけ読む設計なので、都度上書きして実行
+              export DIFY_INPUTS=$(jq -nc --arg p "$P" --argjson h "$H" --arg pwd "$PASSWORD" \
+                '{pair:$p, horizon_hours:$h, password:$pwd, comment:("auto by dify-schedule ("+($h|tostring)+"h)") }')
+              echo "Running pair=$P horizon=$H"
+              # 依存を入れて1回実行
+              yarn
+              yarn workflowDify
+            done
+            exit 0
+          fi
+
+          # Hが空（オリジナルの既定枠や手動実行）の場合は、既存の env.DIFY_INPUTS を使って一回だけ実行
+          echo "No horizon override. Use env DIFY_INPUTS once."
+          yarn
+          yarn workflowDify
+
+      # ↑ 上のステップで workflowDify を呼ぶので、下の3ステップは不要ですが
+      #   もし原形を残したい場合はコメントアウトせずOK（多重実行が嫌なら削除してください）
+      # - name: Run Project
+      #   run: |
+      #     yarn
+      #     yarn workflowDify
