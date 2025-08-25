@@ -40,8 +40,17 @@ jobs:
   DifyWorkflow:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-node@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Ensure jq
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
 
       # ▼▼ 追加ステップ：発火した cron に応じて horizon を決め、
       #   USDJPY / GBPUSD を順に実行（password も注入） ▼▼
@@ -49,8 +58,6 @@ jobs:
         env:
           SCHEDULE: ${{ github.event.schedule }}
           PASSWORD: ${{ secrets.WORKFLOW_PASSWORD }}
-          TOKENS:   ${{ env.DIFY_TOKENS }}
-          BASE_URL: ${{ env.DIFY_BASE_URL }}
         run: |
           set -euo pipefail
           echo "Triggered by schedule: '${SCHEDULE}'"
@@ -58,35 +65,26 @@ jobs:
           # どの cron で来たかを horizon にマッピング
           H=""
           case "$SCHEDULE" in
-            "10 0 * * 2") H="72" ;;               # Tue 00:10 UTC (JST Tue 09:10)
-            "15 0 * * *") H="24" ;;               # Daily 00:15 UTC (JST 09:15)
-            "20 0 * * *"|"30 8 * * *"|"30 14 * * *") H="8" ;;   # JST 09:20 / 17:30 / 23:30
-            "25 0 * * *"|"0 4,8,12,16,20 * * *") H="4" ;;       # JST 09:25 / 13/17/21/01/05:00
+            "10 0 * * 2") H="72" ;;                                # Tue 00:10 UTC (JST Tue 09:10)
+            "15 0 * * *") H="24" ;;                                # Daily 00:15 UTC (JST 09:15)
+            "20 0 * * *"|"30 8 * * *"|"30 14 * * *") H="8" ;;      # JST 09:20 / 17:30 / 23:30
+            "25 0 * * *"|"0 4,8,12,16,20 * * *") H="4" ;;          # JST 09:25 / 13/17/21/01/05:00
             *) H="" ;;
           esac
 
-          # 手動実行や既定枠のとき、Secretsの DIFY_INPUTS をそのまま使いたいなら H="" のままでもOK
           if [ -n "$H" ]; then
             for P in USDJPY GBPUSD; do
-              # dify-schedule は DIFY_INPUTS を1回分だけ読む設計なので、都度上書きして実行
+              # ★ API仕様通りに inputs をラップして 400 を回避
               export DIFY_INPUTS=$(jq -nc --arg p "$P" --argjson h "$H" --arg pwd "$PASSWORD" \
-                '{pair:$p, horizon_hours:$h, password:$pwd, comment:("auto by dify-schedule ("+($h|tostring)+"h)") }')
+                '{inputs:{pair:$p,horizon_hours:$h,password:$pwd,comment:("auto by dify-schedule ("+($h|tostring)+"h)")},response_mode:"blocking",user:"github-cron"}')
               echo "Running pair=$P horizon=$H"
-              # 依存を入れて1回実行
               yarn
               yarn workflowDify
             done
             exit 0
           fi
 
-          # Hが空（オリジナルの既定枠や手動実行）の場合は、既存の env.DIFY_INPUTS を使って一回だけ実行
+          # Hが空（既定枠/手動実行）の場合は、既存の env.DIFY_INPUTS をそのまま使用
           echo "No horizon override. Use env DIFY_INPUTS once."
           yarn
           yarn workflowDify
-
-      # ↑ 上のステップで workflowDify を呼ぶので、下の3ステップは不要ですが
-      #   もし原形を残したい場合はコメントアウトせずOK（多重実行が嫌なら削除してください）
-      # - name: Run Project
-      #   run: |
-      #     yarn
-      #     yarn workflowDify
